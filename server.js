@@ -6,6 +6,7 @@ const session = require('express-session');
 require('dotenv').config();
 
 const { db, logActivity, createUserTaskFolder, saveTaskMetadata, updateTaskMetadata, checkTaskAccess } = require('./database');
+const authService = require('./auth'); // Добавьте эту строку
 
 const app = express();
 const PORT = process.env.PORT || 3000;
