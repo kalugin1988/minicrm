@@ -70,3 +70,59 @@ School CRM - это веб-приложение для управления за
 
 ### Конфигурация
 Создайте файл `.env` со следующими параметрами:
+PORT=3000
+SESSION_SECRET=your_secret_key
+LDAP_AUTH_URL=your_ldap_endpoint
+ALLOWED_GROUPS=admin_teachers,department_heads
+
+## API Endpoints
+
+### Аутентификация
+- `POST /api/login` - вход в систему
+- `POST /api/logout` - выход
+- `GET /api/user` - информация о текущем пользователе
+
+### Задачи
+- `GET /api/tasks` - список задач
+- `POST /api/tasks` - создание задачи
+- `GET /api/tasks/:id` - получение задачи
+- `PUT /api/tasks/:id` - обновление задачи
+- `DELETE /api/tasks/:id` - удаление задачи
+- `POST /api/tasks/:id/copy` - копирование задачи
+
+### Файлы
+- `POST /api/tasks/:id/files` - загрузка файлов
+- `GET /api/tasks/:id/files` - список файлов задачи
+- `GET /api/files/:id/download` - скачивание файла
+
+### Логи
+- `GET /api/activity-logs` - история действий
+
+## Тестовые пользователи
+
+После первого запуска создаются тестовые пользователи:
+- **Администратор**: director / director123
+- **Завуч**: zavuch / zavuch123  
+- **Учитель**: teacher / teacher123
+
+## Лицензия
+
+MIT License - разрешается свободное использование и модификация.
+
+## Поддержка
+
+Для вопросов и предложений создавайте issues в репозитории проекта.
+
+## Структура проекта
+school-crm/
+├── server.js # Основной сервер
+├── auth.js # Логика аутентификации
+├── database.js # Работа с базой данных
+├── package.json # Зависимости
+├── .env # Конфигурация
+├── public/ # Статические файлы
+│ ├── index.html # Главная страница
+│ ├── style.css # Стили
+│ └── script.js # Клиентский код
+└── uploads/ # Загруженные файлы
+└── tasks/ # Файлы задач
