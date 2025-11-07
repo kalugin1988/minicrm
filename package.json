@@ -1,0 +1,22 @@
+{
+  "name": "school-crm",
+  "version": "1.0.0",
+  "description": "CRM система для школы с управлением задачами",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "~2.4.3",
+    "dotenv": "~16.3.1",
+    "express": "^4.21.2",
+    "express-session": "^1.18.2",
+    "multer": "^2.0.2",
+    "node-fetch": "~2.6.7",
+    "sqlite3": "~5.1.6"
+  },
+  "devDependencies": {
+    "nodemon": "~3.0.1"
+  }
+}

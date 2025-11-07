@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>School CRM - Управление задачами</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Форма логина -->
+    <div id="login-modal" class="modal">
+        <div class="modal-content">
+            <h2>Вход в School CRM</h2>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="login">Логин:</label>
+                    <input type="text" id="login" name="login" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Пароль:</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <button type="submit">Войти</button>
+            </form>
+            <div class="test-users">
+                <h3>Тестовый пользователь:</h3>
+                <ul>
+                    <li><strong>teacher</strong> / teacher123</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <header>
+            <h1>School CRM - Управление задачами</h1>
+            <div class="user-info">
+                <span id="current-user"></span>
+                <button onclick="logout()">Выйти</button>
+            </div>
+            <nav>
+                <button onclick="showSection('tasks')">Задачи</button>
+                <button onclick="showSection('create-task')">Создать задачу</button>
+                <button onclick="showSection('logs')">Лог активности</button>
+            </nav>
+        </header>
+
+        <main>
+            <!-- Секция списка задач -->
+            <section id="tasks-section" class="section">
+                <h2>Все задачи</h2>
+                <div id="tasks-controls">
+                    <label>
+                        <input type="checkbox" id="show-deleted" onchange="loadTasks()">
+                        Показать удаленные задачи
+                    </label>
+                </div>
+                <div id="tasks-list"></div>
+            </section>
+
+            <!-- Секция создания задачи -->
+            <section id="create-task-section" class="section">
+                <h2>Создать новую задачу</h2>
+                <form id="create-task-form" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <label for="title">Название задачи:</label>
+                        <input type="text" id="title" name="title" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="description">Описание:</label>
+                        <textarea id="description" name="description" rows="4"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="start-date">Дата и время начала (необязательно):</label>
+                        <input type="datetime-local" id="start-date" name="startDate">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="due-date">Дата и время выполнения (необязательно):</label>
+                        <input type="datetime-local" id="due-date" name="dueDate">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Исполнители:</label>
+                        <div id="users-checklist" class="checkbox-group"></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="files">Прикрепить файлы (до 15 файлов, максимум 300MB):</label>
+                        <input type="file" id="files" name="files" multiple>
+                        <div id="file-list"></div>
+                    </div>
+
+                    <button type="submit">Создать задачу</button>
+                </form>
+            </section>
+
+            <!-- Секция логов -->
+            <section id="logs-section" class="section">
+                <h2>Лог активности</h2>
+                <div id="logs-list"></div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Модальное окно для редактирования задачи -->
+    <div id="edit-task-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeEditModal()">&times;</span>
+            <h3>Редактировать задачу</h3>
+            <form id="edit-task-form">
+                <input type="hidden" id="edit-task-id">
+                <div class="form-group">
+                    <label for="edit-title">Название задачи:</label>
+                    <input type="text" id="edit-title" name="title" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="edit-description">Описание:</label>
+                    <textarea id="edit-description" name="description" rows="4"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="edit-start-date">Дата и время начала:</label>
+                    <input type="datetime-local" id="edit-start-date" name="startDate">
+                </div>
+
+                <div class="form-group">
+                    <label for="edit-due-date">Дата и время выполнения:</label>
+                    <input type="datetime-local" id="edit-due-date" name="dueDate">
+                </div>
+
+                <div class="form-group">
+                    <label>Исполнители:</label>
+                    <div id="edit-users-checklist" class="checkbox-group"></div>
+                </div>
+
+                <button type="submit">Сохранить изменения</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно для копирования задачи -->
+    <div id="copy-task-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeCopyModal()">&times;</span>
+            <h3>Создать копию задачи</h3>
+            <form id="copy-task-form">
+                <input type="hidden" id="copy-task-id">
+                
+                <div class="form-group">
+                    <label for="copy-start-date">Дата и время начала для копии:</label>
+                    <input type="datetime-local" id="copy-start-date" name="startDate">
+                </div>
+
+                <div class="form-group">
+                    <label for="copy-due-date">Дата и время выполнения для копии:</label>
+                    <input type="datetime-local" id="copy-due-date" name="dueDate">
+                </div>
+
+                <div class="form-group">
+                    <label>Назначить исполнителей для копии:</label>
+                    <div id="copy-users-checklist" class="checkbox-group"></div>
+                </div>
+                <button type="submit">Создать копию</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модальное окно для редактирования сроков исполнителя -->
+    <div id="edit-assignment-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeEditAssignmentModal()">&times;</span>
+            <h3>Редактировать сроки исполнителя</h3>
+            <form id="edit-assignment-form">
+                <input type="hidden" id="edit-assignment-task-id">
+                <input type="hidden" id="edit-assignment-user-id">
+                <div class="form-group">
+                    <label for="edit-assignment-start-date">Дата и время начала:</label>
+                    <input type="datetime-local" id="edit-assignment-start-date" name="startDate">
+                </div>
+                <div class="form-group">
+                    <label for="edit-assignment-due-date">Дата и время выполнения:</label>
+                    <input type="datetime-local" id="edit-assignment-due-date" name="dueDate">
+                </div>
+                <button type="submit">Сохранить сроки</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
