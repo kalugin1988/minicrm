@@ -6,7 +6,6 @@ const session = require('express-session');
 require('dotenv').config();
 
 const { db, logActivity, createUserTaskFolder, saveTaskMetadata, updateTaskMetadata, checkTaskAccess } = require('./database');
-const authService = require('./auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,7 +14,9 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
-app.use('/uploads', express.static('uploads'));
+
+// Статические файлы из папки data/uploads
+app.use('/uploads', express.static(path.join(__dirname, 'data', 'uploads')));
 
 // Сессии
 app.use(session({
@@ -43,8 +44,10 @@ const storage = multer.diskStorage({
             const userFolder = createUserTaskFolder(taskId, userLogin);
             cb(null, userFolder);
         } else {
-            const tempDir = path.join(__dirname, 'uploads/temp');
-            createDirIfNotExists(tempDir);
+            const tempDir = path.join(__dirname, 'data', 'uploads', 'temp');
+            if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true });
+            }
             cb(null, tempDir);
         }
     },
@@ -267,7 +270,7 @@ app.post('/api/tasks', requireAuth, upload.array('files', 15), (req, res) => {
                     });
 
                     // Очищаем временную папку
-                    const tempDir = path.join(__dirname, 'uploads/temp');
+                    const tempDir = path.join(__dirname, 'data', 'uploads', 'temp');
                     if (fs.existsSync(tempDir)) {
                         fs.rmSync(tempDir, { recursive: true, force: true });
                     }
@@ -760,6 +763,7 @@ app.get('/api/activity-logs', requireAuth, (req, res) => {
 app.listen(PORT, () => {
     console.log(`CRM сервер запущен на порту ${PORT}`);
     console.log(`Откройте http://localhost:${PORT} в браузере`);
+    console.log('Данные хранятся в папке:', path.join(__dirname, 'data'));
     console.log('Тестовые пользователи:');
     console.log('- Логин: director, Пароль: director123 (Администратор)');
     console.log('- Логин: zavuch, Пароль: zavuch123');

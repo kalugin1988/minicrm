@@ -3,18 +3,23 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
 
-const dbPath = path.join(__dirname, 'school_crm.db');
-
-// Создаем папки если нет
+// Создаем папку data если нет
+const dataDir = path.join(__dirname, 'data');
 const createDirIfNotExists = (dirPath) => {
     if (!fs.existsSync(dirPath)) {
         fs.mkdirSync(dirPath, { recursive: true });
     }
 };
 
-const uploadsDir = path.join(__dirname, 'uploads');
+createDirIfNotExists(dataDir);
+
+// Путь к базе данных в папке data
+const dbPath = path.join(dataDir, 'school_crm.db');
+
+// Папки для загрузок и логов в data
+const uploadsDir = path.join(dataDir, 'uploads');
 const tasksDir = path.join(uploadsDir, 'tasks');
-const logsDir = path.join(__dirname, 'logs');
+const logsDir = path.join(dataDir, 'logs');
 
 createDirIfNotExists(uploadsDir);
 createDirIfNotExists(tasksDir);
@@ -25,6 +30,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
         console.error('Ошибка подключения к БД:', err.message);
     } else {
         console.log('Подключение к SQLite установлено');
+        console.log('База данных расположена:', dbPath);
         initializeDatabase();
     }
 });
@@ -105,7 +111,7 @@ function initializeDatabase() {
         FOREIGN KEY (user_id) REFERENCES users (id)
     )`);
 
-    console.log('База данных инициализирована');
+    console.log('База данных инициализирована в папке data');
 }
 
 function createTaskFolder(taskId) {
