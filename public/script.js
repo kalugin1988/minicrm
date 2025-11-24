@@ -1,6 +1,7 @@
 let currentUser = null;
 let users = [];
 let tasks = [];
+let filteredUsers = [];
 
 // Инициализация при загрузке
 document.addEventListener('DOMContentLoaded', function() {
@@ -43,11 +44,17 @@ function showMainInterface() {
     
     document.getElementById('current-user').textContent = userInfo;
     
-    // Показываем чекбокс удаленных задач только для администраторов
-    if (currentUser.role === 'admin') {
-        document.getElementById('tasks-controls').style.display = 'block';
-    } else {
-        document.getElementById('tasks-controls').style.display = 'none';
+    // Показываем фильтры ВСЕМ пользователям, а не только администраторам
+    document.getElementById('tasks-controls').style.display = 'block';
+    
+    // Чекбокс удаленных задач показываем только администраторам
+    const showDeletedLabel = document.querySelector('.show-deleted-label');
+    if (showDeletedLabel) {
+        if (currentUser.role === 'admin') {
+            showDeletedLabel.style.display = 'flex';
+        } else {
+            showDeletedLabel.style.display = 'none';
+        }
     }
     
     loadUsers();
@@ -62,7 +69,9 @@ function setupEventListeners() {
     document.getElementById('edit-task-form').addEventListener('submit', updateTask);
     document.getElementById('copy-task-form').addEventListener('submit', copyTask);
     document.getElementById('edit-assignment-form').addEventListener('submit', updateAssignment);
+    document.getElementById('rework-task-form').addEventListener('submit', sendForRework);
     document.getElementById('files').addEventListener('change', updateFileList);
+    document.getElementById('edit-files').addEventListener('change', updateEditFileList);
 }
 
 async function login(event) {
@@ -122,6 +131,7 @@ async function loadUsers() {
     try {
         const response = await fetch('/api/users');
         users = await response.json();
+        filteredUsers = [...users];
         renderUsersChecklist();
         renderEditUsersChecklist();
         renderCopyUsersChecklist();
@@ -130,9 +140,49 @@ async function loadUsers() {
     }
 }
 
+// Фильтрация пользователей
+function filterUsers() {
+    const search = document.getElementById('user-search').value.toLowerCase();
+    filteredUsers = users.filter(user => 
+        user.name.toLowerCase().includes(search) ||
+        user.login.toLowerCase().includes(search) ||
+        user.email.toLowerCase().includes(search)
+    );
+    renderUsersChecklist();
+}
+
+function filterEditUsers() {
+    const search = document.getElementById('edit-user-search').value.toLowerCase();
+    const filtered = users.filter(user => 
+        user.name.toLowerCase().includes(search) ||
+        user.login.toLowerCase().includes(search) ||
+        user.email.toLowerCase().includes(search)
+    );
+    renderEditUsersChecklist(filtered);
+}
+
+function filterCopyUsers() {
+    const search = document.getElementById('copy-user-search').value.toLowerCase();
+    const filtered = users.filter(user => 
+        user.name.toLowerCase().includes(search) ||
+        user.login.toLowerCase().includes(search) ||
+        user.email.toLowerCase().includes(search)
+    );
+    renderCopyUsersChecklist(filtered);
+}
+
 async function loadTasks() {
     try {
-        const response = await fetch('/api/tasks');
+        const search = document.getElementById('search-tasks')?.value || '';
+        const statusFilter = document.getElementById('status-filter')?.value || 'active,in_progress,assigned,overdue,rework';
+        const showDeleted = document.getElementById('show-deleted')?.checked || false;
+        
+        let url = '/api/tasks?';
+        if (search) url += `search=${encodeURIComponent(search)}&`;
+        if (statusFilter) url += `status=${encodeURIComponent(statusFilter)}&`;
+        if (showDeleted) url += `showDeleted=true&`;
+        
+        const response = await fetch(url);
         tasks = await response.json();
         renderTasks();
         
@@ -157,7 +207,7 @@ async function loadActivityLogs() {
 
 function renderUsersChecklist() {
     const container = document.getElementById('users-checklist');
-    container.innerHTML = users
+    container.innerHTML = filteredUsers
         .filter(user => user.id !== currentUser.id)
         .map(user => `
         <div class="checkbox-item">
@@ -170,9 +220,9 @@ function renderUsersChecklist() {
     `).join('');
 }
 
-function renderEditUsersChecklist() {
+function renderEditUsersChecklist(filtered = users) {
     const container = document.getElementById('edit-users-checklist');
-    container.innerHTML = users
+    container.innerHTML = filtered
         .filter(user => user.id !== currentUser.id)
         .map(user => `
         <div class="checkbox-item">
@@ -185,9 +235,9 @@ function renderEditUsersChecklist() {
     `).join('');
 }
 
-function renderCopyUsersChecklist() {
+function renderCopyUsersChecklist(filtered = users) {
     const container = document.getElementById('copy-users-checklist');
-    container.innerHTML = users
+    container.innerHTML = filtered
         .filter(user => user.id !== currentUser.id)
         .map(user => `
         <div class="checkbox-item">
@@ -218,17 +268,23 @@ function renderTasks() {
         const overallStatus = getTaskOverallStatus(task);
         const statusClass = getStatusClass(overallStatus);
         const isDeleted = task.status === 'deleted';
+        const isClosed = task.closed_at !== null;
         const userRole = getUserRoleInTask(task);
         const canEdit = canUserEditTask(task);
         const isCopy = task.original_task_id !== null;
         
         return `
-            <div class="task-card ${isDeleted ? 'deleted' : ''}">
+            <div class="task-card ${isDeleted ? 'deleted' : ''} ${isClosed ? 'closed' : ''}">
                 <div class="task-actions">
-                    ${!isDeleted ? `
-                        <button class="edit-btn" onclick="openEditModal(${task.id})" title="Редактировать">✏️</button>
+                    ${!isDeleted && !isClosed ? `
+                        ${canEdit ? `<button class="edit-btn" onclick="openEditModal(${task.id})" title="Редактировать">✏️</button>` : ''}
                         <button class="copy-btn" onclick="openCopyModal(${task.id})" title="Создать копию">📋</button>
-                        <button class="delete-btn" onclick="deleteTask(${task.id})" title="Удалить">🗑️</button>
+                        ${canEdit ? `<button class="rework-btn" onclick="openReworkModal(${task.id})" title="Вернуть на доработку">🔄</button>` : ''}
+                        ${canEdit ? `<button class="close-btn" onclick="closeTask(${task.id})" title="Закрыть задачу">🔒</button>` : ''}
+                        ${canEdit ? `<button class="delete-btn" onclick="deleteTask(${task.id})" title="Удалить">🗑️</button>` : ''}
+                    ` : ''}
+                    ${isClosed && canEdit ? `
+                        <button class="reopen-btn" onclick="reopenTask(${task.id})" title="Открыть задачу">🔓</button>
                     ` : ''}
                     ${isDeleted && currentUser.role === 'admin' ? `
                         <button class="restore-btn" onclick="restoreTask(${task.id})" title="Восстановить">↶</button>
@@ -239,6 +295,7 @@ function renderTasks() {
                     <div class="task-title">
                         ${task.title}
                         ${isDeleted ? '<span class="deleted-badge">Удалена</span>' : ''}
+                        ${isClosed ? '<span class="closed-badge">Закрыта</span>' : ''}
                         ${isCopy ? '<span class="copy-badge">Копия</span>' : ''}
                         <span class="role-badge ${getRoleBadgeClass(userRole)}">${userRole}</span>
                     </div>
@@ -252,6 +309,12 @@ function renderTasks() {
                 ` : ''}
                 
                 <div class="task-description">${task.description || 'Нет описания'}</div>
+                
+                ${task.rework_comment ? `
+                    <div class="rework-comment">
+                        <strong>Комментарий к доработке:</strong> ${task.rework_comment}
+                    </div>
+                ` : ''}
                 
                 ${task.start_date || task.due_date ? `
                     <div class="task-dates">
@@ -276,6 +339,7 @@ function renderTasks() {
                 <div class="task-meta">
                     <small>Создана: ${formatDateTime(task.created_at)} | Автор: ${task.creator_name}</small>
                     ${task.deleted_at ? `<br><small>Удалена: ${formatDateTime(task.deleted_at)}</small>` : ''}
+                    ${task.closed_at ? `<br><small>Закрыта: ${formatDateTime(task.closed_at)}</small>` : ''}
                 </div>
             </div>
         `;
@@ -286,9 +350,10 @@ function renderAssignment(assignment, taskId, canEdit) {
     const statusClass = getStatusClass(assignment.status);
     const isCurrentUser = assignment.user_id === currentUser.id;
     const isOverdue = assignment.status === 'overdue';
+    const isRework = assignment.status === 'rework';
     
     return `
-        <div class="assignment ${isOverdue ? 'overdue' : ''}">
+        <div class="assignment ${isOverdue ? 'overdue' : ''} ${isRework ? 'rework' : ''}">
             <span class="assignment-status ${statusClass}"></span>
             <div style="flex: 1;">
                 <strong>${assignment.user_name}</strong>
@@ -299,11 +364,16 @@ function renderAssignment(assignment, taskId, canEdit) {
                         ${assignment.due_date ? `<small>Выполнить до: ${formatDateTime(assignment.due_date)}</small>` : ''}
                     </div>
                 ` : ''}
+                ${assignment.rework_comment ? `
+                    <div class="assignment-rework-comment">
+                        <small><strong>Комментарий:</strong> ${assignment.rework_comment}</small>
+                    </div>
+                ` : ''}
             </div>
             <div class="action-buttons">
                 ${isCurrentUser && assignment.status === 'assigned' ? 
                     `<button onclick="updateStatus(${taskId}, ${assignment.user_id}, 'in_progress')">Приступить</button>` : ''}
-                ${isCurrentUser && (assignment.status === 'in_progress' || assignment.status === 'overdue') ? 
+                ${isCurrentUser && (assignment.status === 'in_progress' || assignment.status === 'overdue' || assignment.status === 'rework') ? 
                     `<button onclick="updateStatus(${taskId}, ${assignment.user_id}, 'completed')">Выполнено</button>` : ''}
                 ${canEdit ? 
                     `<button class="edit-date-btn" onclick="openEditAssignmentModal(${taskId}, ${assignment.user_id})" title="Редактировать сроки">📅</button>` : ''}
@@ -349,6 +419,8 @@ async function createTask(event) {
             alert('Задача успешно создана!');
             document.getElementById('create-task-form').reset();
             document.getElementById('file-list').innerHTML = '';
+            document.getElementById('user-search').value = '';
+            filterUsers();
             loadTasks();
             loadActivityLogs();
             showSection('tasks');
@@ -405,6 +477,9 @@ async function openEditModal(taskId) {
 
 function closeEditModal() {
     document.getElementById('edit-task-modal').style.display = 'none';
+    document.getElementById('edit-file-list').innerHTML = '';
+    document.getElementById('edit-user-search').value = '';
+    filterEditUsers();
 }
 
 async function updateTask(event) {
@@ -419,19 +494,22 @@ async function updateTask(event) {
     const assignedUsers = document.querySelectorAll('#edit-users-checklist input[name="assignedUsers"]:checked');
     const assignedUserIds = Array.from(assignedUsers).map(cb => parseInt(cb.value));
     
+    const formData = new FormData();
+    formData.append('title', title);
+    formData.append('description', description);
+    formData.append('assignedUsers', JSON.stringify(assignedUserIds));
+    if (startDate) formData.append('startDate', startDate);
+    if (dueDate) formData.append('dueDate', dueDate);
+    
+    const files = document.getElementById('edit-files').files;
+    for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+    }
+
     try {
         const response = await fetch(`/api/tasks/${taskId}`, {
             method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ 
-                title, 
-                description, 
-                assignedUsers: assignedUserIds,
-                startDate: startDate || null,
-                dueDate: dueDate || null
-            })
+            body: formData
         });
 
         if (response.ok) {
@@ -456,9 +534,10 @@ function openCopyModal(taskId) {
 
 function closeCopyModal() {
     document.getElementById('copy-task-modal').style.display = 'none';
+    document.getElementById('copy-user-search').value = '';
+    filterCopyUsers();
 }
 
-// В функции copyTask улучшаем обработку ошибок
 async function copyTask(event) {
     event.preventDefault();
     
@@ -555,6 +634,90 @@ async function updateAssignment(event) {
     }
 }
 
+function openReworkModal(taskId) {
+    document.getElementById('rework-task-id').value = taskId;
+    document.getElementById('rework-task-modal').style.display = 'block';
+}
+
+function closeReworkModal() {
+    document.getElementById('rework-task-modal').style.display = 'none';
+    document.getElementById('rework-comment').value = '';
+}
+
+async function sendForRework(event) {
+    event.preventDefault();
+    
+    const taskId = document.getElementById('rework-task-id').value;
+    const comment = document.getElementById('rework-comment').value;
+
+    try {
+        const response = await fetch(`/api/tasks/${taskId}/rework`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ comment })
+        });
+
+        if (response.ok) {
+            alert('Задача возвращена на доработку!');
+            closeReworkModal();
+            loadTasks();
+            loadActivityLogs();
+        } else {
+            const error = await response.json();
+            alert(error.error || 'Ошибка возврата задачи на доработку');
+        }
+    } catch (error) {
+        console.error('Ошибка:', error);
+        alert('Ошибка возврата задачи на доработку');
+    }
+}
+
+async function closeTask(taskId) {
+    if (!confirm('Вы уверены, что хотите закрыть эту задачу? Исполнители больше не будут видеть её.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/tasks/${taskId}/close`, {
+            method: 'POST'
+        });
+
+        if (response.ok) {
+            alert('Задача закрыта!');
+            loadTasks();
+            loadActivityLogs();
+        } else {
+            const error = await response.json();
+            alert(error.error || 'Ошибка закрытия задачи');
+        }
+    } catch (error) {
+        console.error('Ошибка:', error);
+        alert('Ошибка закрытия задачи');
+    }
+}
+
+async function reopenTask(taskId) {
+    try {
+        const response = await fetch(`/api/tasks/${taskId}/reopen`, {
+            method: 'POST'
+        });
+
+        if (response.ok) {
+            alert('Задача открыта!');
+            loadTasks();
+            loadActivityLogs();
+        } else {
+            const error = await response.json();
+            alert(error.error || 'Ошибка открытия задачи');
+        }
+    } catch (error) {
+        console.error('Ошибка:', error);
+        alert('Ошибка открытия задачи');
+    }
+}
+
 async function deleteTask(taskId) {
     if (!confirm('Вы уверены, что хотите удалить эту задачу?')) {
         return;
@@ -599,7 +762,6 @@ async function restoreTask(taskId) {
     }
 }
 
-// В функции updateStatus улучшаем обработку ошибок
 async function updateStatus(taskId, userId, status) {
     try {
         const response = await fetch(`/api/tasks/${taskId}/status`, {
@@ -625,12 +787,14 @@ async function updateStatus(taskId, userId, status) {
 
 function getTaskOverallStatus(task) {
     if (task.status === 'deleted') return 'deleted';
+    if (task.closed_at) return 'closed'; // Закрытые задачи всегда имеют статус 'closed'
     if (!task.assignments || task.assignments.length === 0) return 'unassigned';
 
     const assignments = task.assignments;
     let hasAssigned = false;
     let hasInProgress = false;
     let hasOverdue = false;
+    let hasRework = false;
     let allCompleted = true;
 
     for (let assignment of assignments) {
@@ -643,12 +807,16 @@ function getTaskOverallStatus(task) {
         } else if (assignment.status === 'overdue') {
             hasOverdue = true;
             allCompleted = false;
+        } else if (assignment.status === 'rework') {
+            hasRework = true;
+            allCompleted = false;
         } else if (assignment.status !== 'completed') {
             allCompleted = false;
         }
     }
 
     if (allCompleted) return 'completed';
+    if (hasRework) return 'rework';
     if (hasOverdue) return 'overdue';
     if (hasInProgress) return 'in_progress';
     if (hasAssigned) return 'assigned';
@@ -658,9 +826,11 @@ function getTaskOverallStatus(task) {
 function getStatusClass(status) {
     switch (status) {
         case 'deleted': return 'status-gray';
+        case 'closed': return 'status-gray';
         case 'unassigned': return 'status-purple';
         case 'assigned': return 'status-red';
         case 'in_progress': return 'status-orange';
+        case 'rework': return 'status-yellow';
         case 'overdue': return 'status-darkred';
         case 'completed': return 'status-green';
         default: return 'status-purple';
@@ -670,9 +840,11 @@ function getStatusClass(status) {
 function getStatusText(status) {
     switch (status) {
         case 'deleted': return 'Удалена';
+        case 'closed': return 'Закрыта';
         case 'unassigned': return 'Не назначена';
         case 'assigned': return 'Назначена';
         case 'in_progress': return 'В работе';
+        case 'rework': return 'На доработке';
         case 'overdue': return 'Просрочена';
         case 'completed': return 'Выполнена';
         default: return 'Неизвестно';
@@ -729,6 +901,16 @@ function formatDateTimeForInput(dateTimeString) {
 function updateFileList() {
     const fileInput = document.getElementById('files');
     const fileList = document.getElementById('file-list');
+    updateFileListForInput(fileInput, fileList);
+}
+
+function updateEditFileList() {
+    const fileInput = document.getElementById('edit-files');
+    const fileList = document.getElementById('edit-file-list');
+    updateFileListForInput(fileInput, fileList);
+}
+
+function updateFileListForInput(fileInput, fileList) {
     const files = fileInput.files;
     
     if (files.length === 0) {
@@ -780,7 +962,11 @@ function getActionText(action) {
         'TASK_ASSIGNMENTS_UPDATED': 'обновил назначения',
         'ASSIGNMENT_UPDATED': 'обновил сроки исполнителя',
         'STATUS_CHANGED': 'изменил статус задачи',
-        'FILE_UPLOADED': 'загрузил файл'
+        'FILE_UPLOADED': 'загрузил файл',
+        'FILE_COPIED': 'скопировал файл',
+        'TASK_SENT_FOR_REWORK': 'вернул задачу на доработку',
+        'TASK_CLOSED': 'закрыл задачу',
+        'TASK_REOPENED': 'открыл задачу'
     };
     
     return actions[action] || action;

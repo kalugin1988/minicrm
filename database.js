@@ -66,9 +66,13 @@ function initializeDatabase() {
         original_task_id INTEGER,
         start_date DATETIME,
         due_date DATETIME,
+        rework_comment TEXT,
+        closed_at DATETIME,
+        closed_by INTEGER,
         FOREIGN KEY (created_by) REFERENCES users (id),
         FOREIGN KEY (deleted_by) REFERENCES users (id),
-        FOREIGN KEY (original_task_id) REFERENCES tasks (id)
+        FOREIGN KEY (original_task_id) REFERENCES tasks (id),
+        FOREIGN KEY (closed_by) REFERENCES users (id)
     )`);
 
     // Таблица назначений задач
@@ -79,6 +83,7 @@ function initializeDatabase() {
         status TEXT DEFAULT 'assigned',
         start_date DATETIME,
         due_date DATETIME,
+        rework_comment TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (task_id) REFERENCES tasks (id),
@@ -112,6 +117,43 @@ function initializeDatabase() {
     )`);
 
     console.log('База данных инициализирована в папке data');
+    
+    // Добавляем недостающие колонки если они не существуют
+    setTimeout(addMissingColumns, 1000);
+}
+
+// Функция для добавления недостающих колонок
+function addMissingColumns() {
+    const columnsToAdd = [
+        { table: 'tasks', column: 'rework_comment', type: 'TEXT' },
+        { table: 'tasks', column: 'closed_at', type: 'DATETIME' },
+        { table: 'tasks', column: 'closed_by', type: 'INTEGER' },
+        { table: 'task_assignments', column: 'rework_comment', type: 'TEXT' }
+    ];
+
+    columnsToAdd.forEach(({ table, column, type }) => {
+        // Используем db.all вместо db.get для получения всех строк
+        db.all(`PRAGMA table_info(${table})`, (err, rows) => {
+            if (err) {
+                console.error(`Ошибка при проверке таблицы ${table}:`, err);
+                return;
+            }
+
+            // rows теперь массив, можно использовать some
+            const columnExists = rows.some(row => row.name === column);
+            if (!columnExists) {
+                db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`, (err) => {
+                    if (err) {
+                        console.error(`Ошибка при добавлении колонки ${column} в таблицу ${table}:`, err);
+                    } else {
+                        console.log(`✅ Добавлена колонка ${column} в таблицу ${table}`);
+                    }
+                });
+            } else {
+                console.log(`✅ Колонка ${column} уже существует в таблице ${table}`);
+            }
+        });
+    });
 }
 
 function createTaskFolder(taskId) {
@@ -181,17 +223,31 @@ function checkTaskAccess(userId, taskId, callback) {
             return;
         }
 
-        // Обычные пользователи видят только задачи где они заказчик или исполнитель
-        const query = `
-            SELECT 1 FROM tasks t
-            WHERE t.id = ? AND (
-                t.created_by = ? 
-                OR EXISTS (SELECT 1 FROM task_assignments WHERE task_id = t.id AND user_id = ?)
-            )
-        `;
+        // Проверяем, не закрыта ли задача
+        db.get("SELECT status, created_by, closed_at FROM tasks WHERE id = ?", [taskId], (err, task) => {
+            if (err || !task) {
+                callback(err, false);
+                return;
+            }
 
-        db.get(query, [taskId, userId, userId], (err, row) => {
-            callback(err, !!row);
+            // Если задача закрыта, доступ есть только у создателя и администраторов
+            if (task.closed_at && task.created_by !== userId && user.role !== 'admin') {
+                callback(null, false);
+                return;
+            }
+
+            // Обычные пользователи видят только задачи где они заказчик или исполнитель
+            const query = `
+                SELECT 1 FROM tasks t
+                WHERE t.id = ? AND (
+                    t.created_by = ? 
+                    OR EXISTS (SELECT 1 FROM task_assignments WHERE task_id = t.id AND user_id = ?)
+                )
+            `;
+
+            db.get(query, [taskId, userId, userId], (err, row) => {
+                callback(err, !!row);
+            });
         });
     });
 }
@@ -200,6 +256,7 @@ function checkTaskAccess(userId, taskId, callback) {
 function checkOverdueTasks() {
     const now = new Date().toISOString();
     
+    // Временно убираем проверку на closed_at до добавления колонки
     const query = `
         SELECT ta.id, ta.task_id, ta.user_id, ta.status, ta.due_date
         FROM task_assignments ta

@@ -6,7 +6,7 @@ const session = require('express-session');
 require('dotenv').config();
 
 const { db, logActivity, createUserTaskFolder, saveTaskMetadata, updateTaskMetadata, checkTaskAccess } = require('./database');
-const authService = require('./auth'); // Добавьте эту строку
+const authService = require('./auth'); 
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -80,7 +80,37 @@ function checkIfOverdue(dueDate, status) {
     const due = new Date(dueDate);
     return due < now;
 }
+// Функция для проверки просроченных задач
+function checkOverdueTasks() {
+    const now = new Date().toISOString();
+    
+    // Проверяем только активные незакрытые задачи
+    const query = `
+        SELECT ta.id, ta.task_id, ta.user_id, ta.status, ta.due_date
+        FROM task_assignments ta
+        JOIN tasks t ON ta.task_id = t.id
+        WHERE ta.due_date IS NOT NULL 
+        AND ta.due_date < ? 
+        AND ta.status NOT IN ('completed', 'overdue')
+        AND t.status = 'active'
+        AND t.closed_at IS NULL
+    `;
 
+    db.all(query, [now], (err, assignments) => {
+        if (err) {
+            console.error('Ошибка при проверке просроченных задач:', err);
+            return;
+        }
+
+        assignments.forEach(assignment => {
+            db.run(
+                "UPDATE task_assignments SET status = 'overdue' WHERE id = ?",
+                [assignment.id]
+            );
+            logActivity(assignment.task_id, assignment.user_id, 'STATUS_CHANGED', 'Задача просрочена');
+        });
+    });
+}
 // ==================== МАРШРУТЫ АУТЕНТИФИКАЦИИ ====================
 
 app.post('/api/login', async (req, res) => {
@@ -139,7 +169,25 @@ app.get('/api/user', (req, res) => {
 // ==================== МАРШРУТЫ ПОЛЬЗОВАТЕЛЕЙ ====================
 
 app.get('/api/users', requireAuth, (req, res) => {
-    db.all("SELECT id, login, name, email, role, auth_type FROM users WHERE role IN ('admin', 'teacher') ORDER BY name", (err, rows) => {
+    const search = req.query.search || '';
+    
+    let query = `
+        SELECT id, login, name, email, role, auth_type 
+        FROM users 
+        WHERE role IN ('admin', 'teacher') 
+    `;
+    
+    const params = [];
+    
+    if (search) {
+        query += ` AND (login LIKE ? OR name LIKE ? OR email LIKE ?)`;
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern, searchPattern);
+    }
+    
+    query += " ORDER BY name";
+    
+    db.all(query, params, (err, rows) => {
         if (err) {
             res.status(500).json({ error: err.message });
             return;
@@ -150,10 +198,12 @@ app.get('/api/users', requireAuth, (req, res) => {
 
 // ==================== МАРШРУТЫ ЗАДАЧ ====================
 
-// Получить задачи с учетом прав доступа
+// Получить задачи с учетом прав доступа и фильтров
 app.get('/api/tasks', requireAuth, (req, res) => {
     const userId = req.session.user.id;
-    const showDeleted = req.session.user.role === 'admin';
+    const showDeleted = req.session.user.role === 'admin' && req.query.showDeleted === 'true';
+    const search = req.query.search || '';
+    const statusFilter = req.query.status || 'active,in_progress,assigned,overdue,rework'; // По умолчанию все кроме выполненных и закрытых
 
     let query = `
         SELECT DISTINCT
@@ -173,18 +223,64 @@ app.get('/api/tasks', requireAuth, (req, res) => {
         WHERE 1=1
     `;
 
+    const params = [];
+
     // Для обычных пользователей показываем только задачи где они заказчик или исполнитель
     if (req.session.user.role !== 'admin') {
-        query += ` AND (t.created_by = ${userId} OR ta.user_id = ${userId})`;
+        query += ` AND (t.created_by = ? OR ta.user_id = ?)`;
+        params.push(userId, userId);
     }
 
     if (!showDeleted) {
         query += " AND t.status = 'active'";
     }
 
+    // Фильтр по статусу
+    if (statusFilter && statusFilter !== 'all') {
+        const statuses = statusFilter.split(',');
+        
+        // Если в фильтре есть 'closed', показываем закрытые задачи
+        if (statuses.includes('closed')) {
+            // Для исполнителей показываем только свои закрытые задачи
+            if (req.session.user.role !== 'admin') {
+                query += ` AND (t.closed_at IS NOT NULL AND t.created_by = ?)`;
+                params.push(userId);
+            } else {
+                // Для администраторов показываем все закрытые задачи
+                query += ` AND t.closed_at IS NOT NULL`;
+            }
+        } else {
+            // Если 'closed' нет в фильтре, скрываем закрытые задачи для всех
+            query += ` AND t.closed_at IS NULL`;
+            
+            // Добавляем фильтрацию по статусам назначений
+            if (statuses.length > 0 && !statuses.includes('all')) {
+                query += ` AND EXISTS (
+                    SELECT 1 FROM task_assignments ta2 
+                    WHERE ta2.task_id = t.id AND ta2.status IN (${statuses.map(() => '?').join(',')})
+                )`;
+                statuses.forEach(status => params.push(status));
+            }
+        }
+    } else {
+        // Если фильтр 'all', для исполнителей все равно скрываем чужие закрытые задачи
+        if (req.session.user.role !== 'admin') {
+            query += ` AND (t.closed_at IS NULL OR t.created_by = ?)`;
+            params.push(userId);
+        }
+        // Для администраторов при фильтре 'all' показываем все включая закрытые
+    }
+
+    // Поиск по тексту
+    if (search) {
+        query += ` AND (t.title LIKE ? OR t.description LIKE ?)`;
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern);
+    }
+
     query += " GROUP BY t.id ORDER BY t.created_at DESC";
 
-    db.all(query, (err, tasks) => {
+    db.all(query, params, (err, tasks) => {
         if (err) {
             res.status(500).json({ error: err.message });
             return;
@@ -301,7 +397,7 @@ app.post('/api/tasks', requireAuth, upload.array('files', 15), (req, res) => {
     });
 });
 
-// Копировать задачу
+// Копировать задачу с файлами
 app.post('/api/tasks/:taskId/copy', requireAuth, (req, res) => {
     const { taskId } = req.params;
     const { assignedUsers, startDate, dueDate } = req.body;
@@ -338,6 +434,30 @@ app.post('/api/tasks/:taskId/copy', requireAuth, (req, res) => {
                         saveTaskMetadata(newTaskId, newTitle, originalTask.description, createdBy, taskId, startDate, dueDate);
 
                         logActivity(newTaskId, createdBy, 'TASK_COPIED', `Создана копия задачи: ${newTitle}`);
+                        
+                                                // Копируем файлы из оригинальной задачи
+                                                db.all("SELECT * FROM task_files WHERE task_id = ?", [taskId], (err, originalFiles) => {
+                                                    if (!err && originalFiles && originalFiles.length > 0) {
+                                                        originalFiles.forEach(originalFile => {
+                                                            const originalFilePath = originalFile.file_path;
+                                                            const newFilename = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(originalFile.original_name);
+                                                            const userFolder = createUserTaskFolder(newTaskId, req.session.user.login);
+                                                            const newFilePath = path.join(userFolder, newFilename);
+                        
+                                                            // Копируем файл
+                                                            if (fs.existsSync(originalFilePath)) {
+                                                                fs.copyFileSync(originalFilePath, newFilePath);
+                        
+                                                                db.run(
+                                                                    "INSERT INTO task_files (task_id, user_id, filename, original_name, file_path, file_size) VALUES (?, ?, ?, ?, ?, ?)",
+                                                                    [newTaskId, createdBy, newFilename, originalFile.original_name, newFilePath, originalFile.file_size]
+                                                                );
+                        
+                                                                logActivity(newTaskId, createdBy, 'FILE_COPIED', `Скопирован файл: ${originalFile.original_name}`);
+                                                            }
+                                                        });
+                                                    }
+                                                });
 
                         // Назначаем пользователей
                         if (assignedUsers && assignedUsers.length > 0) {
@@ -387,12 +507,13 @@ app.get('/api/tasks/:taskId', requireAuth, (req, res) => {
             LEFT JOIN users ou ON ot.created_by = ou.id
             WHERE t.id = ?
         `;
+        const params = [taskId];
 
         if (!showDeleted) {
             query += " AND t.status = 'active'";
         }
 
-        db.get(query, [taskId], (err, task) => {
+        db.get(query, params, (err, task) => {
             if (err || !task) {
                 return res.status(404).json({ error: 'Задача не найдена' });
             }
@@ -424,8 +545,8 @@ app.get('/api/tasks/:taskId', requireAuth, (req, res) => {
     });
 });
 
-// Обновить задачу с проверкой прав
-app.put('/api/tasks/:taskId', requireAuth, (req, res) => {
+// Обновить задачу с проверкой прав и возможностью добавления файлов
+app.put('/api/tasks/:taskId', requireAuth, upload.array('files', 15), (req, res) => {
     const { taskId } = req.params;
     const { title, description, assignedUsers, startDate, dueDate } = req.body;
     const userId = req.session.user.id;
@@ -460,6 +581,28 @@ app.put('/api/tasks/:taskId', requireAuth, (req, res) => {
 
                     logActivity(taskId, userId, 'TASK_UPDATED', `Задача обновлена: ${title}`);
 
+                    // Обрабатываем новые файлы
+                    if (req.files && req.files.length > 0) {
+                        const userFolder = createUserTaskFolder(taskId, req.session.user.login);
+                        
+                        req.files.forEach(file => {
+                            const newPath = path.join(userFolder, path.basename(file.filename));
+                            fs.renameSync(file.path, newPath);
+
+                            db.run(
+                                "INSERT INTO task_files (task_id, user_id, filename, original_name, file_path, file_size) VALUES (?, ?, ?, ?, ?, ?)",
+                                [taskId, userId, path.basename(file.filename), file.originalname, newPath, file.size]
+                            );
+
+                            logActivity(taskId, userId, 'FILE_UPLOADED', `Загружен файл: ${file.originalname}`);
+                        });
+
+                        // Очищаем временную папку
+                        const tempDir = path.join(__dirname, 'data', 'uploads', 'temp');
+                        if (fs.existsSync(tempDir)) {
+                            fs.rmSync(tempDir, { recursive: true, force: true });
+                        }
+                    }
                     // Обновляем назначения если переданы
                     if (assignedUsers) {
                         // Удаляем старые назначения
@@ -487,6 +630,118 @@ app.put('/api/tasks/:taskId', requireAuth, (req, res) => {
         });
     });
 });
+
+// Вернуть задачу на доработку
+app.post('/api/tasks/:taskId/rework', requireAuth, (req, res) => {
+    const { taskId } = req.params;
+    const { comment } = req.body;
+    const userId = req.session.user.id;
+
+    // Проверяем права - только создатель или администратор могут возвращать на доработку
+    db.get("SELECT created_by FROM tasks WHERE id = ?", [taskId], (err, task) => {
+        if (err || !task) {
+            return res.status(404).json({ error: 'Задача не найдена' });
+        }
+
+        if (req.session.user.role !== 'admin' && task.created_by !== userId) {
+            return res.status(403).json({ error: 'У вас нет прав для возврата задачи на доработку' });
+        }
+
+        db.serialize(() => {
+            // Обновляем задачу с комментарием
+            db.run(
+                "UPDATE tasks SET rework_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [comment || 'Требуется доработка', taskId],
+                function(err) {
+                    if (err) {
+                        res.status(500).json({ error: err.message });
+                        return;
+                    }
+
+                    // Обновляем статусы всех назначений на 'rework'
+                    db.run(
+                        "UPDATE task_assignments SET status = 'rework', rework_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?",
+                        [comment || 'Требуется доработка', taskId],
+                        function(err) {
+                            if (err) {
+                                res.status(500).json({ error: err.message });
+                                return;
+                            }
+
+                            logActivity(taskId, userId, 'TASK_SENT_FOR_REWORK', `Задача возвращена на доработку: ${comment}`);
+                            res.json({ success: true, message: 'Задача возвращена на доработку' });
+                        }
+                    );
+                }
+            );
+        });
+    });
+});
+
+// Закрыть задачу
+app.post('/api/tasks/:taskId/close', requireAuth, (req, res) => {
+    const { taskId } = req.params;
+    const userId = req.session.user.id;
+
+    // Проверяем права - только создатель или администратор могут закрывать задачу
+    db.get("SELECT created_by FROM tasks WHERE id = ?", [taskId], (err, task) => {
+        if (err || !task) {
+            return res.status(404).json({ error: 'Задача не найдена' });
+        }
+
+        if (req.session.user.role !== 'admin' && task.created_by !== userId) {
+            return res.status(403).json({ error: 'У вас нет прав для закрытия этой задачи' });
+        }
+
+        db.run(
+            "UPDATE tasks SET closed_at = CURRENT_TIMESTAMP, closed_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [userId, taskId],
+            function(err) {
+                if (err) {
+                    res.status(500).json({ error: err.message });
+                    return;
+                }
+
+                logActivity(taskId, userId, 'TASK_CLOSED', `Задача закрыта`);
+                res.json({ success: true, message: 'Задача закрыта' });
+            }
+        );
+    });
+});
+
+// Открыть задачу (отменить закрытие)
+app.post('/api/tasks/:taskId/reopen', requireAuth, (req, res) => {
+    const { taskId } = req.params;
+    const userId = req.session.user.id;
+
+    // Проверяем права - только создатель или администратор могут открывать задачу
+    db.get("SELECT created_by FROM tasks WHERE id = ?", [taskId], (err, task) => {
+        if (err || !task) {
+            return res.status(404).json({ error: 'Задача не найдена' });
+        }
+
+        if (req.session.user.role !== 'admin' && task.created_by !== userId) {
+            return res.status(403).json({ error: 'У вас нет прав для открытия этой задачи' });
+        }
+
+        db.run(
+            "UPDATE tasks SET closed_at = NULL, closed_by = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [taskId],
+            function(err) {
+                if (err) {
+                    res.status(500).json({ error: err.message });
+                    return;
+                }
+
+                logActivity(taskId, userId, 'TASK_REOPENED', `Задача открыта`);
+                res.json({ success: true, message: 'Задача открыта' });
+            }
+        );
+    });
+});
+
+// Остальные маршруты остаются без изменений...
+// (Обновить сроки исполнителя, Удалить задачу, Восстановить задачу, Обновить статус, Файлы, Логи)
 
 // Обновить сроки для конкретного исполнителя
 app.put('/api/tasks/:taskId/assignment/:userId', requireAuth, (req, res) => {
