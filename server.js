@@ -21,10 +21,14 @@ app.use('/uploads', express.static(path.join(__dirname, 'data', 'uploads')));
 
 // Сессии
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'fallback_secret',
-    resave: false,
+    secret: process.env.SESSION_SECRET || 'fallback_secret_change_in_production',
+    resave: true, // Изменено на true для лучшей поддержки LDAP
     saveUninitialized: false,
-    cookie: { secure: false, maxAge: 24 * 60 * 60 * 1000 }
+    cookie: { 
+        secure: false, 
+        maxAge: 24 * 60 * 60 * 1000,
+        httpOnly: true
+    }
 }));
 
 // Middleware для проверки аутентификации
@@ -80,6 +84,7 @@ function checkIfOverdue(dueDate, status) {
     const due = new Date(dueDate);
     return due < now;
 }
+
 // Функция для проверки просроченных задач
 function checkOverdueTasks() {
     const now = new Date().toISOString();
@@ -111,6 +116,7 @@ function checkOverdueTasks() {
         });
     });
 }
+
 // ==================== МАРШРУТЫ АУТЕНТИФИКАЦИИ ====================
 
 app.post('/api/login', async (req, res) => {
@@ -123,25 +129,37 @@ app.post('/api/login', async (req, res) => {
     try {
         const user = await authService.authenticate(login, password);
         if (user) {
-            req.session.user = user;
+            // Подготавливаем данные пользователя для сессии
+            const sessionUser = {
+                id: user.id,
+                login: user.login,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                auth_type: user.auth_type,
+                groups: user.groups ? (typeof user.groups === 'string' ? JSON.parse(user.groups) : user.groups) : []
+            };
+
+            // Сохраняем в сессию
+            req.session.user = sessionUser;
             
-            // Логируем успешный вход
-            console.log(`Успешная авторизация: ${user.name} (${user.login}) через ${user.auth_type}`);
-            if (user.groups) {
-                console.log(`Группы пользователя: ${user.groups}`);
-            }
-            
-            res.json({ 
-                success: true, 
-                user: {
-                    id: user.id,
-                    login: user.login,
-                    name: user.name,
-                    email: user.email,
-                    role: user.role,
-                    auth_type: user.auth_type,
-                    groups: user.groups ? JSON.parse(user.groups) : []
+            // Явно сохраняем сессию
+            req.session.save((err) => {
+                if (err) {
+                    console.error('Ошибка сохранения сессии:', err);
+                    return res.status(500).json({ error: 'Ошибка сохранения сессии' });
                 }
+
+                // Логируем успешный вход
+                console.log(`Успешная авторизация: ${user.name} (${user.login}) через ${user.auth_type}`);
+                if (user.groups) {
+                    console.log(`Группы пользователя: ${user.groups}`);
+                }
+                
+                res.json({ 
+                    success: true, 
+                    user: sessionUser
+                });
             });
         } else {
             console.log(`Неудачная попытка входа: ${login}`);
@@ -154,13 +172,44 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.post('/api/logout', (req, res) => {
-    req.session.destroy();
-    res.json({ success: true });
+    req.session.destroy((err) => {
+        if (err) {
+            console.error('Ошибка при выходе:', err);
+            return res.status(500).json({ error: 'Ошибка при выходе' });
+        }
+        res.json({ success: true });
+    });
 });
 
 app.get('/api/user', (req, res) => {
     if (req.session.user) {
-        res.json({ user: req.session.user });
+        // Обновляем данные пользователя из базы на случай изменений
+        authService.getUserById(req.session.user.id)
+            .then(user => {
+                if (user) {
+                    const updatedUser = {
+                        id: user.id,
+                        login: user.login,
+                        name: user.name,
+                        email: user.email,
+                        role: user.role,
+                        auth_type: user.auth_type,
+                        groups: user.groups ? (typeof user.groups === 'string' ? JSON.parse(user.groups) : user.groups) : []
+                    };
+                    
+                    // Обновляем сессию
+                    req.session.user = updatedUser;
+                    res.json({ user: updatedUser });
+                } else {
+                    // Пользователь не найден в базе - разлогиниваем
+                    req.session.destroy();
+                    res.status(401).json({ error: 'Пользователь не найден' });
+                }
+            })
+            .catch(err => {
+                console.error('Ошибка получения пользователя:', err);
+                res.status(500).json({ error: 'Ошибка сервера' });
+            });
     } else {
         res.status(401).json({ error: 'Не аутентифицирован' });
     }
@@ -435,29 +484,29 @@ app.post('/api/tasks/:taskId/copy', requireAuth, (req, res) => {
 
                         logActivity(newTaskId, createdBy, 'TASK_COPIED', `Создана копия задачи: ${newTitle}`);
                         
-                                                // Копируем файлы из оригинальной задачи
-                                                db.all("SELECT * FROM task_files WHERE task_id = ?", [taskId], (err, originalFiles) => {
-                                                    if (!err && originalFiles && originalFiles.length > 0) {
-                                                        originalFiles.forEach(originalFile => {
-                                                            const originalFilePath = originalFile.file_path;
-                                                            const newFilename = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(originalFile.original_name);
-                                                            const userFolder = createUserTaskFolder(newTaskId, req.session.user.login);
-                                                            const newFilePath = path.join(userFolder, newFilename);
-                        
-                                                            // Копируем файл
-                                                            if (fs.existsSync(originalFilePath)) {
-                                                                fs.copyFileSync(originalFilePath, newFilePath);
-                        
-                                                                db.run(
-                                                                    "INSERT INTO task_files (task_id, user_id, filename, original_name, file_path, file_size) VALUES (?, ?, ?, ?, ?, ?)",
-                                                                    [newTaskId, createdBy, newFilename, originalFile.original_name, newFilePath, originalFile.file_size]
-                                                                );
-                        
-                                                                logActivity(newTaskId, createdBy, 'FILE_COPIED', `Скопирован файл: ${originalFile.original_name}`);
-                                                            }
-                                                        });
-                                                    }
-                                                });
+                        // Копируем файлы из оригинальной задачи
+                        db.all("SELECT * FROM task_files WHERE task_id = ?", [taskId], (err, originalFiles) => {
+                            if (!err && originalFiles && originalFiles.length > 0) {
+                                originalFiles.forEach(originalFile => {
+                                    const originalFilePath = originalFile.file_path;
+                                    const newFilename = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(originalFile.original_name);
+                                    const userFolder = createUserTaskFolder(newTaskId, req.session.user.login);
+                                    const newFilePath = path.join(userFolder, newFilename);
+
+                                    // Копируем файл
+                                    if (fs.existsSync(originalFilePath)) {
+                                        fs.copyFileSync(originalFilePath, newFilePath);
+
+                                        db.run(
+                                            "INSERT INTO task_files (task_id, user_id, filename, original_name, file_path, file_size) VALUES (?, ?, ?, ?, ?, ?)",
+                                            [newTaskId, createdBy, newFilename, originalFile.original_name, newFilePath, originalFile.file_size]
+                                        );
+
+                                        logActivity(newTaskId, createdBy, 'FILE_COPIED', `Скопирован файл: ${originalFile.original_name}`);
+                                    }
+                                });
+                            }
+                        });
 
                         // Назначаем пользователей
                         if (assignedUsers && assignedUsers.length > 0) {
@@ -740,9 +789,6 @@ app.post('/api/tasks/:taskId/reopen', requireAuth, (req, res) => {
     });
 });
 
-// Остальные маршруты остаются без изменений...
-// (Обновить сроки исполнителя, Удалить задачу, Восстановить задачу, Обновить статус, Файлы, Логи)
-
 // Обновить сроки для конкретного исполнителя
 app.put('/api/tasks/:taskId/assignment/:userId', requireAuth, (req, res) => {
     const { taskId, userId } = req.params;
@@ -756,7 +802,7 @@ app.put('/api/tasks/:taskId/assignment/:userId', requireAuth, (req, res) => {
         }
 
         if (req.session.user.role !== 'admin' && task.created_by !== currentUserId) {
-            return res.status(403).json({ error: 'У вас нет прав для редактирования сроков' });
+            return res.status(403).json({ error: 'У вас нет прав для редактирования сроки' });
         }
 
         db.run(
@@ -1026,4 +1072,7 @@ app.listen(PORT, () => {
     console.log('- Логин: teacher, Пароль: teacher123');
     console.log('LDAP авторизация доступна для пользователей школы');
     console.log(`Разрешенные группы: ${process.env.ALLOWED_GROUPS}`);
+    
+    // Запускаем проверку просроченных задач каждую минуту
+    setInterval(checkOverdueTasks, 60000);
 });

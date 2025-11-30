@@ -91,6 +91,9 @@ class AuthService {
 
                 const isValid = await bcrypt.compare(password, user.password);
                 if (isValid) {
+                    // Обновляем last_login
+                    db.run("UPDATE users SET last_login = datetime('now') WHERE id = ?", [user.id]);
+                    
                     // Не возвращаем пароль
                     const { password, ...userWithoutPassword } = user;
                     resolve(userWithoutPassword);
@@ -135,7 +138,7 @@ class AuthService {
         const allowedGroups = process.env.ALLOWED_GROUPS ? 
             process.env.ALLOWED_GROUPS.split(',').map(g => g.trim()) : [];
         
-        const isAdmin = groups.some(group => 
+        const isAdmin = groups && groups.some(group => 
             allowedGroups.includes(group)
         );
         
@@ -151,11 +154,11 @@ class AuthService {
 
                 const userData = {
                     login: username,
-                    name: full_name,
+                    name: full_name || username,
                     email: `${username}@school25.ru`,
                     role: role,
                     auth_type: 'ldap',
-                    groups: JSON.stringify(groups),
+                    groups: groups ? JSON.stringify(groups) : '[]',
                     description: description || '',
                     last_login: new Date().toISOString()
                 };
@@ -164,14 +167,26 @@ class AuthService {
                     // Обновляем существующего пользователя
                     db.run(
                         `UPDATE users SET 
-                         name = ?, email = ?, role = ?, groups = ?, description = ?, last_login = datetime('now')
+                         name = ?, email = ?, role = ?, groups = ?, description = ?, last_login = datetime('now'),
+                         updated_at = datetime('now')
                          WHERE id = ?`,
                         [userData.name, userData.email, userData.role, userData.groups, userData.description, existingUser.id],
                         function(err) {
                             if (err) {
                                 reject(err);
                             } else {
-                                resolve({ ...existingUser, ...userData });
+                                // Возвращаем полные данные пользователя
+                                resolve({ 
+                                    id: existingUser.id,
+                                    login: userData.login,
+                                    name: userData.name,
+                                    email: userData.email,
+                                    role: userData.role,
+                                    auth_type: userData.auth_type,
+                                    groups: userData.groups,
+                                    description: userData.description,
+                                    last_login: new Date().toISOString()
+                                });
                             }
                         }
                     );
@@ -188,7 +203,14 @@ class AuthService {
                             } else {
                                 resolve({
                                     id: this.lastID,
-                                    ...userData
+                                    login: userData.login,
+                                    name: userData.name,
+                                    email: userData.email,
+                                    role: userData.role,
+                                    auth_type: userData.auth_type,
+                                    groups: userData.groups,
+                                    description: userData.description,
+                                    last_login: new Date().toISOString()
                                 });
                             }
                         }
@@ -216,7 +238,7 @@ class AuthService {
 
     getUserById(id) {
         return new Promise((resolve, reject) => {
-            db.get("SELECT id, login, name, email, role, auth_type, groups, description FROM users WHERE id = ?", [id], (err, user) => {
+            db.get("SELECT id, login, name, email, role, auth_type, groups, description, last_login FROM users WHERE id = ?", [id], (err, user) => {
                 if (err) {
                     reject(err);
                 } else {
