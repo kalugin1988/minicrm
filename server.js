@@ -3,6 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const session = require('express-session');
+const fetch = require('node-fetch');
 require('dotenv').config();
 
 const { db, logActivity, createUserTaskFolder, saveTaskMetadata, updateTaskMetadata, checkTaskAccess } = require('./database');
@@ -22,7 +23,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'data', 'uploads')));
 // Сессии
 app.use(session({
     secret: process.env.SESSION_SECRET || 'fallback_secret_change_in_production',
-    resave: true, // Изменено на true для лучшей поддержки LDAP
+    resave: true,
     saveUninitialized: false,
     cookie: { 
         secure: false, 
@@ -115,6 +116,191 @@ function checkOverdueTasks() {
             logActivity(assignment.task_id, assignment.user_id, 'STATUS_CHANGED', 'Задача просрочена');
         });
     });
+}
+
+// ==================== СИСТЕМА УВЕДОМЛЕНИЙ ====================
+
+/**
+ * Кодирование логина и пароля в Base64 для Basic Auth
+ */
+function encodeBasicAuth(login, password) {
+    return Buffer.from(`${login}:${password}`).toString('base64');
+}
+
+/**
+ * Отправка уведомлений всем участникам задачи
+ * @param {string} type - Тип события: 'created', 'updated', 'rework', 'closed', 'status_changed'
+ * @param {number} taskId - ID задачи
+ * @param {string} taskTitle - Название задачи
+ * @param {string} taskDescription - Описание задачи
+ * @param {number} authorId - ID автора изменения
+ * @param {string} comment - Комментарий (для доработки)
+ * @param {string} status - Новый статус (для status_changed)
+ * @param {string} userName - Имя пользователя, изменившего статус
+ */
+async function sendTaskNotifications(type, taskId, taskTitle, taskDescription, authorId, comment = '', status = '', userName = '') {
+    try {
+        // Проверяем наличие настроек уведомлений
+        if (!process.env.NOTIFICATION_SERVICE_URL || 
+            !process.env.NOTIFICATION_SERVICE_LOGIN || 
+            !process.env.NOTIFICATION_SERVICE_PASSWORD) {
+            console.log('Настройки сервиса уведомлений не заданы');
+            return;
+        }
+
+        // Получаем ВСЕХ участников задачи (создателя + исполнителей)
+        const participants = await new Promise((resolve, reject) => {
+            db.all(`
+                -- Получаем создателя задачи
+                SELECT t.created_by as user_id, u.name as user_name, u.login as user_login, u.email, 'creator' as role
+                FROM tasks t
+                LEFT JOIN users u ON t.created_by = u.id
+                WHERE t.id = ?
+                
+                UNION
+                
+                -- Получаем всех исполнителей
+                SELECT ta.user_id, u.name as user_name, u.login as user_login, u.email, 'assignee' as role
+                FROM task_assignments ta
+                LEFT JOIN users u ON ta.user_id = u.id
+                WHERE ta.task_id = ?
+            `, [taskId, taskId], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        if (!participants || participants.length === 0) {
+            console.log('Нет участников для уведомления');
+            return;
+        }
+
+        // Получаем информацию об авторе изменения
+        const author = await new Promise((resolve, reject) => {
+            db.get("SELECT name FROM users WHERE id = ?", [authorId], (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            });
+        });
+
+        const authorName = author ? author.name : 'Система';
+
+        // Формируем текст уведомления в зависимости от типа события
+        let subject, content;
+
+        switch (type) {
+            case 'created':
+                subject = `Новая задача: ${taskTitle}`;
+                content = `Создана новая задача:\n\n` +
+                         `📋 ${taskTitle}\n` +
+                         `📝 ${taskDescription || 'Без описания'}\n` +
+                         `👤 Автор: ${authorName}\n\n` +
+                         `Для просмотра перейдите в систему управления задачами.`;
+                break;
+
+            case 'updated':
+                subject = `Обновлена задача: ${taskTitle}`;
+                content = `Задача была обновлена:\n\n` +
+                         `📋 ${taskTitle}\n` +
+                         `📝 ${taskDescription || 'Без описания'}\n` +
+                         `👤 Изменено: ${authorName}\n\n` +
+                         `Для просмотра изменений перейдите в систему управления задачами.`;
+                break;
+
+            case 'rework':
+                subject = `Задача возвращена на доработку: ${taskTitle}`;
+                content = `Задача возвращена на доработку:\n\n` +
+                         `📋 ${taskTitle}\n` +
+                         `📝 Комментарий: ${comment}\n` +
+                         `👤 Автор замечания: ${authorName}\n\n` +
+                         `Пожалуйста, исправьте замечания и обновите статус задачи.`;
+                break;
+
+            case 'closed':
+                subject = `Задача закрыта: ${taskTitle}`;
+                content = `Задача была закрыта:\n\n` +
+                         `📋 ${taskTitle}\n` +
+                         `👤 Закрыта: ${authorName}\n\n` +
+                         `Задача завершена и перемещена в архив.`;
+                break;
+
+            case 'status_changed':
+                const statusText = getStatusText(status);
+                subject = `Изменен статус задачи: ${taskTitle}`;
+                content = `Статус задачи изменен:\n\n` +
+                         `📋 ${taskTitle}\n` +
+                         `🔄 Новый статус: ${statusText}\n` +
+                         `👤 Изменил: ${userName || authorName}\n\n` +
+                         `Для просмотра перейдите в систему управления задачами.`;
+                break;
+
+            default:
+                return;
+        }
+
+        // Формируем список ID получателей (исключаем автора изменения, чтобы он не получал уведомление о своем действии)
+        const recipientIds = participants
+            .filter(p => p.user_id !== authorId) // Исключаем автора действия
+            .map(p => p.user_id);
+
+        // Если после фильтрации не осталось получателей, выходим
+        if (recipientIds.length === 0) {
+            console.log('Нет получателей для уведомления (все участники - автор изменения)');
+            return;
+        }
+
+        // Кодируем логин и пароль для Basic Auth
+        const authHeader = encodeBasicAuth(
+            process.env.NOTIFICATION_SERVICE_LOGIN,
+            process.env.NOTIFICATION_SERVICE_PASSWORD
+        );
+
+        // Создаем FormData для отправки
+        const FormData = require('form-data');
+        const formData = new FormData();
+        formData.append('subject', subject);
+        formData.append('content', content);
+        formData.append('recipients', JSON.stringify(recipientIds));
+        formData.append('deliveryMethods', JSON.stringify(['email', 'telegram', 'vk']));
+
+        // Отправляем уведомление
+        const response = await fetch(process.env.NOTIFICATION_SERVICE_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Basic ${authHeader}`
+            },
+            body: formData
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log(`✅ Уведомления отправлены для задачи ${taskId}:`, {
+            type: type,
+            recipients: recipientIds.length,
+            authorExcluded: authorId
+        });
+
+    } catch (error) {
+        console.error('❌ Ошибка отправки уведомлений:', error);
+        // Не прерываем выполнение из-за ошибки уведомлений
+    }
+}
+
+/**
+ * Получить текстовое описание статуса
+ */
+function getStatusText(status) {
+    const statusMap = {
+        'assigned': 'Назначена',
+        'in_progress': 'В работе',
+        'completed': 'Завершена',
+        'overdue': 'Просрочена',
+        'rework': 'На доработке'
+    };
+    return statusMap[status] || status;
 }
 
 // ==================== МАРШРУТЫ АУТЕНТИФИКАЦИИ ====================
@@ -252,7 +438,7 @@ app.get('/api/tasks', requireAuth, (req, res) => {
     const userId = req.session.user.id;
     const showDeleted = req.session.user.role === 'admin' && req.query.showDeleted === 'true';
     const search = req.query.search || '';
-    const statusFilter = req.query.status || 'active,in_progress,assigned,overdue,rework'; // По умолчанию все кроме выполненных и закрытых
+    const statusFilter = req.query.status || 'active,in_progress,assigned,overdue,rework';
 
     let query = `
         SELECT DISTINCT
@@ -288,21 +474,16 @@ app.get('/api/tasks', requireAuth, (req, res) => {
     if (statusFilter && statusFilter !== 'all') {
         const statuses = statusFilter.split(',');
         
-        // Если в фильтре есть 'closed', показываем закрытые задачи
         if (statuses.includes('closed')) {
-            // Для исполнителей показываем только свои закрытые задачи
             if (req.session.user.role !== 'admin') {
                 query += ` AND (t.closed_at IS NOT NULL AND t.created_by = ?)`;
                 params.push(userId);
             } else {
-                // Для администраторов показываем все закрытые задачи
                 query += ` AND t.closed_at IS NOT NULL`;
             }
         } else {
-            // Если 'closed' нет в фильтре, скрываем закрытые задачи для всех
             query += ` AND t.closed_at IS NULL`;
             
-            // Добавляем фильтрацию по статусам назначений
             if (statuses.length > 0 && !statuses.includes('all')) {
                 query += ` AND EXISTS (
                     SELECT 1 FROM task_assignments ta2 
@@ -312,12 +493,10 @@ app.get('/api/tasks', requireAuth, (req, res) => {
             }
         }
     } else {
-        // Если фильтр 'all', для исполнителей все равно скрываем чужие закрытые задачи
         if (req.session.user.role !== 'admin') {
             query += ` AND (t.closed_at IS NULL OR t.created_by = ?)`;
             params.push(userId);
         }
-        // Для администраторов при фильтре 'all' показываем все включая закрытые
     }
 
     // Поиск по тексту
@@ -434,6 +613,9 @@ app.post('/api/tasks', requireAuth, upload.array('files', 15), (req, res) => {
 
                         logActivity(taskId, createdBy, 'TASK_ASSIGNED', `Задача назначена пользователю ${userId}`);
                     });
+
+                    // Отправляем уведомления ВСЕМ участникам (создателю и исполнителям)
+                    sendTaskNotifications('created', taskId, title, description, createdBy);
                 }
 
                 res.json({ 
@@ -518,6 +700,9 @@ app.post('/api/tasks/:taskId/copy', requireAuth, (req, res) => {
                             });
                             
                             logActivity(newTaskId, createdBy, 'TASK_ASSIGNED', `Задача назначена пользователям: ${assignedUsers.join(', ')}`);
+
+                            // Отправляем уведомления ВСЕМ участникам (создателю и исполнителям)
+                            sendTaskNotifications('created', newTaskId, newTitle, originalTask.description, createdBy);
                         }
 
                         res.json({ 
@@ -527,68 +712,6 @@ app.post('/api/tasks/:taskId/copy', requireAuth, (req, res) => {
                         });
                     }
                 );
-            });
-        });
-    });
-});
-
-// Получить задачу по ID с проверкой прав
-app.get('/api/tasks/:taskId', requireAuth, (req, res) => {
-    const { taskId } = req.params;
-    const userId = req.session.user.id;
-
-    checkTaskAccess(userId, taskId, (err, hasAccess) => {
-        if (err || !hasAccess) {
-            return res.status(404).json({ error: 'Задача не найдена или у вас нет прав доступа' });
-        }
-
-        const showDeleted = req.session.user.role === 'admin';
-        let query = `
-            SELECT 
-                t.*,
-                u.name as creator_name,
-                u.login as creator_login,
-                ot.title as original_task_title,
-                ou.name as original_creator_name
-            FROM tasks t
-            LEFT JOIN users u ON t.created_by = u.id
-            LEFT JOIN tasks ot ON t.original_task_id = ot.id
-            LEFT JOIN users ou ON ot.created_by = ou.id
-            WHERE t.id = ?
-        `;
-        const params = [taskId];
-
-        if (!showDeleted) {
-            query += " AND t.status = 'active'";
-        }
-
-        db.get(query, params, (err, task) => {
-            if (err || !task) {
-                return res.status(404).json({ error: 'Задача не найдена' });
-            }
-
-            // Получаем назначения
-            db.all(`
-                SELECT ta.*, u.name as user_name, u.login as user_login
-                FROM task_assignments ta 
-                LEFT JOIN users u ON ta.user_id = u.id 
-                WHERE ta.task_id = ?
-            `, [taskId], (err, assignments) => {
-                if (err) {
-                    task.assignments = [];
-                    res.json(task);
-                    return;
-                }
-
-                // Проверяем просрочку для каждого назначения
-                assignments.forEach(assignment => {
-                    if (checkIfOverdue(assignment.due_date, assignment.status) && assignment.status !== 'completed') {
-                        assignment.status = 'overdue';
-                    }
-                });
-
-                task.assignments = assignments || [];
-                res.json(task);
             });
         });
     });
@@ -652,6 +775,7 @@ app.put('/api/tasks/:taskId', requireAuth, upload.array('files', 15), (req, res)
                             fs.rmSync(tempDir, { recursive: true, force: true });
                         }
                     }
+
                     // Обновляем назначения если переданы
                     if (assignedUsers) {
                         // Удаляем старые назначения
@@ -670,7 +794,13 @@ app.put('/api/tasks/:taskId', requireAuth, upload.array('files', 15), (req, res)
                             });
 
                             logActivity(taskId, userId, 'TASK_ASSIGNMENTS_UPDATED', `Назначения обновлены`);
+
+                            // Отправляем уведомления ВСЕМ участникам об обновлении
+                            sendTaskNotifications('updated', taskId, title, description, userId);
                         });
+                    } else {
+                        // Если назначения не менялись, все равно отправляем уведомление ВСЕМ участникам об обновлении
+                        sendTaskNotifications('updated', taskId, title, description, userId);
                     }
 
                     res.json({ success: true, message: 'Задача обновлена' });
@@ -718,6 +848,14 @@ app.post('/api/tasks/:taskId/rework', requireAuth, (req, res) => {
                             }
 
                             logActivity(taskId, userId, 'TASK_SENT_FOR_REWORK', `Задача возвращена на доработку: ${comment}`);
+
+                            // Отправляем уведомления ВСЕМ участникам о доработке
+                            db.get("SELECT title, description FROM tasks WHERE id = ?", [taskId], (err, taskData) => {
+                                if (!err && taskData) {
+                                    sendTaskNotifications('rework', taskId, taskData.title, taskData.description, userId, comment);
+                                }
+                            });
+
                             res.json({ success: true, message: 'Задача возвращена на доработку' });
                         }
                     );
@@ -752,6 +890,14 @@ app.post('/api/tasks/:taskId/close', requireAuth, (req, res) => {
                 }
 
                 logActivity(taskId, userId, 'TASK_CLOSED', `Задача закрыта`);
+
+                // Отправляем уведомления ВСЕМ участникам о закрытии
+                db.get("SELECT title FROM tasks WHERE id = ?", [taskId], (err, taskData) => {
+                    if (!err && taskData) {
+                        sendTaskNotifications('closed', taskId, taskData.title, '', userId);
+                    }
+                });
+
                 res.json({ success: true, message: 'Задача закрыта' });
             }
         );
@@ -819,6 +965,14 @@ app.put('/api/tasks/:taskId/assignment/:userId', requireAuth, (req, res) => {
                 }
 
                 logActivity(taskId, currentUserId, 'ASSIGNMENT_UPDATED', `Обновлены сроки для пользователя ${userId}`);
+
+                // Отправляем уведомление ВСЕМ участникам об изменении сроков
+                db.get("SELECT title, description FROM tasks WHERE id = ?", [taskId], (err, taskData) => {
+                    if (!err && taskData) {
+                        sendTaskNotifications('updated', taskId, taskData.title, taskData.description, currentUserId);
+                    }
+                });
+
                 res.json({ success: true, message: 'Сроки обновлены' });
             }
         );
@@ -924,27 +1078,54 @@ app.put('/api/tasks/:taskId/status', requireAuth, (req, res) => {
             return res.status(403).json({ error: 'Вы не назначены на эту задачу' });
         }
 
-        // Если задача помечается как выполненная и она просрочена, оставляем статус completed
-        const finalStatus = status === 'completed' ? 'completed' : status;
-
-        db.run(
-            "UPDATE task_assignments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ? AND user_id = ?",
-            [finalStatus, taskId, targetUserId],
-            function(err) {
-                if (err) {
-                    res.status(500).json({ error: err.message });
-                    return;
-                }
-
-                if (this.changes === 0) {
-                    res.status(404).json({ error: 'Назначение не найдено' });
-                    return;
-                }
-
-                logActivity(taskId, targetUserId, 'STATUS_CHANGED', `Статус изменен на: ${finalStatus}`);
-                res.json({ success: true, message: 'Статус обновлен' });
+        // Получаем информацию о задаче и пользователе для уведомления
+        db.get(`
+            SELECT t.title, t.description, u.name as user_name 
+            FROM tasks t 
+            LEFT JOIN users u ON u.id = ? 
+            WHERE t.id = ?
+        `, [currentUserId, taskId], (err, taskData) => {
+            if (err) {
+                console.error('Ошибка получения данных задачи:', err);
             }
-        );
+
+            // Если задача помечается как выполненная и она просрочена, оставляем статус completed
+            const finalStatus = status === 'completed' ? 'completed' : status;
+
+            db.run(
+                "UPDATE task_assignments SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ? AND user_id = ?",
+                [finalStatus, taskId, targetUserId],
+                function(err) {
+                    if (err) {
+                        res.status(500).json({ error: err.message });
+                        return;
+                    }
+
+                    if (this.changes === 0) {
+                        res.status(404).json({ error: 'Назначение не найдено' });
+                        return;
+                    }
+
+                    logActivity(taskId, targetUserId, 'STATUS_CHANGED', `Статус изменен на: ${finalStatus}`);
+                    
+                    // Отправляем уведомления ВСЕМ участникам об изменении статуса
+                    if (taskData) {
+                        sendTaskNotifications(
+                            'status_changed', 
+                            taskId, 
+                            taskData.title, 
+                            taskData.description, 
+                            currentUserId,
+                            '',
+                            finalStatus,
+                            taskData.user_name || req.session.user.name
+                        );
+                    }
+
+                    res.json({ success: true, message: 'Статус обновлен' });
+                }
+            );
+        });
     });
 });
 
@@ -1072,6 +1253,7 @@ app.listen(PORT, () => {
     console.log('- Логин: teacher, Пароль: teacher123');
     console.log('LDAP авторизация доступна для пользователей школы');
     console.log(`Разрешенные группы: ${process.env.ALLOWED_GROUPS}`);
+    console.log('Система уведомлений активна');
     
     // Запускаем проверку просроченных задач каждую минуту
     setInterval(checkOverdueTasks, 60000);
