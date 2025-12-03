@@ -367,35 +367,52 @@ app.post('/api/logout', (req, res) => {
     });
 });
 
+// В server.js обновите маршрут /api/user
 app.get('/api/user', (req, res) => {
     if (req.session.user) {
-        // Обновляем данные пользователя из базы на случай изменений
-        authService.getUserById(req.session.user.id)
-            .then(user => {
-                if (user) {
-                    const updatedUser = {
-                        id: user.id,
-                        login: user.login,
-                        name: user.name,
-                        email: user.email,
-                        role: user.role,
-                        auth_type: user.auth_type,
-                        groups: user.groups ? (typeof user.groups === 'string' ? JSON.parse(user.groups) : user.groups) : []
-                    };
-                    
-                    // Обновляем сессию
-                    req.session.user = updatedUser;
-                    res.json({ user: updatedUser });
-                } else {
-                    // Пользователь не найден в базе - разлогиниваем
+        // Для LDAP пользователей всегда проверяем актуальную роль
+        if (req.session.user.auth_type === 'ldap') {
+            db.get("SELECT groups FROM users WHERE id = ?", [req.session.user.id], (err, user) => {
+                if (err || !user) {
                     req.session.destroy();
-                    res.status(401).json({ error: 'Пользователь не найден' });
+                    return res.status(401).json({ error: 'Пользователь не найден' });
                 }
-            })
-            .catch(err => {
-                console.error('Ошибка получения пользователя:', err);
-                res.status(500).json({ error: 'Ошибка сервера' });
+                
+                // Парсим группы
+                let groups = [];
+                try {
+                    groups = JSON.parse(user.groups || '[]');
+                } catch (e) {
+                    groups = [];
+                }
+                
+                // Проверяем группы
+                const allowedGroups = process.env.ALLOWED_GROUPS ? 
+                    process.env.ALLOWED_GROUPS.split(',').map(g => g.trim()) : [];
+                
+                const isAdmin = groups.some(group => allowedGroups.includes(group));
+                const actualRole = isAdmin ? 'admin' : 'teacher';
+                
+                // Обновляем роль если изменилась
+                if (req.session.user.role !== actualRole) {
+                    console.log(`Обновлена роль пользователя ${req.session.user.login} с ${req.session.user.role} на ${actualRole}`);
+                    
+                    // Обновляем в базе
+                    db.run(
+                        "UPDATE users SET role = ?, updated_at = datetime('now') WHERE id = ?",
+                        [actualRole, req.session.user.id]
+                    );
+                    
+                    // Обновляем в сессии
+                    req.session.user.role = actualRole;
+                }
+                
+                res.json({ user: req.session.user });
             });
+        } else {
+            // Для локальных пользователей просто возвращаем данные
+            res.json({ user: req.session.user });
+        }
     } else {
         res.status(401).json({ error: 'Не аутентифицирован' });
     }
